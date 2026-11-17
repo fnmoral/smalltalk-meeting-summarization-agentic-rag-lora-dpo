@@ -14,6 +14,7 @@ import numpy as np
 import config as cfg
 
 DATA_DIR = Path('QMSum/data/ALL/jsonl')  # replaced by setup_downloads
+MODEL_DIR = None                         # models folder, set by setup_downloads
 
 NOISE = re.compile(r'\{(disfmarker|vocalsound|gap|pause|comment|nonvocalsound)\}')
 THINK = re.compile(r'<think>.*?</think>', re.DOTALL)
@@ -29,14 +30,21 @@ def set_seed(seed=cfg.SEED):
 def free_memory():
     import torch
     gc.collect()
+    gc.collect()  # a second pass frees objects released by the first
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+
+def gpu_gb():
+    # GPU memory held by this notebook right now
+    import torch
+    return torch.cuda.memory_allocated() / 2**30 if torch.cuda.is_available() else 0.0
 
 
 def setup_downloads(path):
     """One folder for everything that is downloaded: the dataset (QMSum/) and the Hugging Face models (models/).
     What is already there is reused, what is missing is downloaded."""
-    global DATA_DIR
+    global DATA_DIR, MODEL_DIR
     import os
     import shutil
     import subprocess
@@ -45,11 +53,13 @@ def setup_downloads(path):
     models = root / 'models'
     models.mkdir(parents=True, exist_ok=True)
     # every Hugging Face download (LLMs, embeddings, HHEM, BERTScore) now goes to this folder
-    os.environ['HF_HUB_CACHE'] = str(models)
-    hub = sys.modules.get('huggingface_hub.constants')
-    if hub is not None and Path(hub.HF_HUB_CACHE).resolve() != models:
-        print('Warning: Hugging Face was loaded before this cell, so models still go to', hub.HF_HUB_CACHE)
-        print('Restart the kernel and run the notebook from the top to fix this.')
+    os.environ['HF_HUB_CACHE'] = MODEL_DIR = str(models)
+    # if Hugging Face libraries were loaded before this cell they remember the old folder, so update them too
+    for name, mod in list(sys.modules.items()):
+        if name.split('.')[0] in ('huggingface_hub', 'transformers', 'sentence_transformers'):
+            for attr in ('HF_HUB_CACHE', 'HUGGINGFACE_HUB_CACHE', 'TRANSFORMERS_CACHE'):
+                if isinstance(getattr(mod, attr, None), (str, Path)):
+                    setattr(mod, attr, MODEL_DIR)
     if not (root / 'QMSum' / 'data').exists():
         print('Downloading QMSum...')
         subprocess.run(['git', 'clone', '--depth', '1', cfg.QMSUM_REPO, str(root / 'QMSum')], check=True)
@@ -166,7 +176,7 @@ class Retriever:
             device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
             embeddings = HuggingFaceEmbeddings(
                 model_name=embed_model,
-                model_kwargs={'device': device},
+                model_kwargs={'device': device}, cache_folder=MODEL_DIR,
                 encode_kwargs={'normalize_embeddings': True},
                 query_encode_kwargs={'normalize_embeddings': True, 'prompt': cfg.BGE_QUERY_PROMPT})
         self.emb = embeddings
@@ -395,12 +405,12 @@ class LLM:
                                   BitsAndBytesConfig)
         self.model_id = model_id
         dtype = compute_dtype()
-        kwargs = {'device_map': 'auto', 'dtype': dtype}
+        kwargs = {'device_map': 'auto', 'dtype': dtype, 'cache_dir': MODEL_DIR}
         if load_4bit:
             kwargs['quantization_config'] = BitsAndBytesConfig(
                 load_in_4bit=True, bnb_4bit_quant_type='nf4',
                 bnb_4bit_compute_dtype=dtype, bnb_4bit_use_double_quant=True)
-        self.tok = AutoTokenizer.from_pretrained(model_id)
+        self.tok = AutoTokenizer.from_pretrained(model_id, cache_dir=MODEL_DIR)
         try:
             self.model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
         except (ValueError, KeyError):
@@ -414,6 +424,7 @@ class LLM:
             self.tok.pad_token = self.tok.eos_token
         self.device = next(self.model.parameters()).device
         self.torch = torch
+        print(f'Loaded {model_id}: {gpu_gb():.1f} GB of GPU memory in use')
 
     def format(self, messages):
         try:
@@ -445,12 +456,25 @@ class LLM:
         enc = self.tok(prompt, return_tensors='pt', add_special_tokens=False).to(self.device)
         kw = self._gen_kwargs(max_new_tokens, temperature, stop, enc['input_ids'].shape[1])
         with self.torch.no_grad():
+            if n == 1 and enc['input_ids'].shape[1] > cfg.PREFILL_CHUNK:
+                kw['past_key_values'] = self._prefill(enc['input_ids'])
             out = self.model.generate(**enc, num_return_sequences=n, **kw)
         texts = [clean_output(self.tok.decode(o[enc['input_ids'].shape[1]:], skip_special_tokens=True))
                  for o in out]
         return texts if n > 1 else texts[0]
 
+    def _prefill(self, ids):
+        # reads a long prompt in pieces and keeps the result in the cache. the answer is the same,
+        # but attention memory grows with piece x prompt length instead of prompt length squared
+        past, last = None, ids.shape[1] - 1
+        for i in range(0, last, cfg.PREFILL_CHUNK):
+            out = self.model(input_ids=ids[:, i:min(i + cfg.PREFILL_CHUNK, last)], past_key_values=past, use_cache=True)
+            past = out.past_key_values
+        return past
+
     def chat_batch(self, batch, max_new_tokens=cfg.MAX_NEW_TOKENS, temperature=0.0):
+        if len(batch) == 1:
+            return [self.chat(batch[0], max_new_tokens=max_new_tokens, temperature=temperature)]
         # left padding so all prompts end at the same position
         self.tok.padding_side = 'left'
         prompts = [self.format(msgs) for msgs in batch]
@@ -461,7 +485,49 @@ class LLM:
                 for o in out]
 
     def unload(self):
-        del self.model
+        self.model = None
+        free_memory()
+        print(f'Unloaded {self.model_id}: {gpu_gb():.1f} GB of GPU memory still in use')
+
+    def memory_check(self, lengths=(2000, 4000, 6000, 8000)):
+        """Prints the peak GPU memory for one prompt of each length, read at once and read in pieces."""
+        torch = self.torch
+        total = torch.cuda.get_device_properties(0).total_memory / 2**30
+        print(f'GPU total {total:.1f} GB, in use before the test {gpu_gb():.1f} GB')
+        token = self.tok(' the', add_special_tokens=False)['input_ids'][0]
+
+        def at_once(ids):
+            self.model(input_ids=ids)
+
+        def in_pieces(ids):
+            self.model(input_ids=ids[:, -1:], past_key_values=self._prefill(ids))
+
+        for n in lengths:
+            ids = torch.full((1, n), token, device=self.device)
+            for label, run in [('at once', at_once), ('in pieces', in_pieces)]:
+                free_memory()
+                torch.cuda.reset_peak_memory_stats()
+                try:
+                    with torch.no_grad():
+                        run(ids)
+                    result = f'peak {torch.cuda.max_memory_allocated() / 2**30:.1f} GB'
+                except RuntimeError as e:
+                    if 'out of memory' not in str(e).lower():
+                        raise
+                    result = 'OUT OF MEMORY'
+                print(f'{n} tokens, {label}: {result}')
+        free_memory()
+        # the two ways of reading must give the same answer
+        text = ' '.join(str(k) for k in range(900))
+        msgs = [{'role': 'user', 'content': text + ' What is the last number above? Answer in one short sentence.'}]
+        chunk = cfg.PREFILL_CHUNK
+        a = self.chat(msgs, max_new_tokens=30)
+        cfg.PREFILL_CHUNK = 10**9
+        b = self.chat(msgs, max_new_tokens=30)
+        cfg.PREFILL_CHUNK = chunk
+        print(f'Prompt of {self.count_tokens(self.format(msgs))} tokens, same answer both ways: {a == b}')
+        print('  in pieces:', a)
+        print('  at once:  ', b)
         free_memory()
 
 
@@ -516,6 +582,8 @@ def run_experiment(llm, mode, examples, meetings_by_id, retriever, out_path, k=c
             res = run_agent(llm, m, ex, retriever, k=k, max_new_tokens=max_new_tokens)
             append_jsonl(out_path, {**ex, **res, 'mode': mode})
         return
+    if mode == 'zeroshot':
+        batch_size = 1  # prompts of 6,000 tokens are too big to batch, attention memory grows with length squared
     for i in tqdm(range(0, len(todo), batch_size)):
         group, batch, contexts = todo[i:i + batch_size], [], []
         for ex in group:
@@ -527,7 +595,16 @@ def run_experiment(llm, mode, examples, meetings_by_id, retriever, out_path, k=c
                 ctx, _ = rag_context(m, ex, retriever, k=k)
                 batch.append(summary_messages(ctx, ex['query']))
             contexts.append(ctx)
-        preds = llm.chat_batch(batch, max_new_tokens=max_new_tokens)
+        try:
+            preds = llm.chat_batch(batch, max_new_tokens=max_new_tokens)
+        except RuntimeError as e:
+            if 'out of memory' not in str(e).lower():
+                raise
+            preds = None
+        if preds is None:
+            # the batch did not fit in GPU memory, so these questions are answered one at a time
+            free_memory()
+            preds = [llm.chat_batch([msgs], max_new_tokens=max_new_tokens)[0] for msgs in batch]
         for ex, ctx, pred in zip(group, contexts, preds):
             append_jsonl(out_path, {**ex, 'pred': pred, 'context': ctx, 'mode': mode})
 
@@ -623,7 +700,8 @@ class Faithfulness:
             try:
                 from transformers import AutoModelForSequenceClassification
                 import torch
-                self.model = AutoModelForSequenceClassification.from_pretrained(cfg.HHEM_MODEL, trust_remote_code=True)
+                self.model = AutoModelForSequenceClassification.from_pretrained(
+                    cfg.HHEM_MODEL, trust_remote_code=True, cache_dir=MODEL_DIR)
                 if torch.cuda.is_available():
                     self.model = self.model.to('cuda')
                 self.model.eval()

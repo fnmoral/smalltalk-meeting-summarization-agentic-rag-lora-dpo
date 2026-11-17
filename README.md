@@ -55,11 +55,13 @@ flowchart LR
 
 | Role | Model |
 |---|---|
-| Small, fine-tuned | Qwen3-4B, Qwen3.5-4B |
-| Bigger, same family | Qwen3-8B, Qwen3.5-9B |
+| Small, fine-tuned | Qwen3-4B |
+| Bigger, same family | Qwen3-8B |
 | Bigger, different family | Ministral 3 8B |
 
 Every model is loaded in 4-bit and answers the same 150 test questions, so the comparison is fair.
+
+A second pair, Qwen3.5-4B and Qwen3.5-9B, is set up in `config.py` but switched off for now. It can be turned on there if time allows.
 
 ## Data
 
@@ -114,7 +116,7 @@ Run the notebooks in order: 1, 2 (once per small model, by changing `MODEL_KEY` 
 
 To change a setting, edit `config.py`, save it, and run the Config cell of the notebook again. The shared code is a `.py` file and not a notebook because all three notebooks need the same functions, and a notebook can't cleanly import code from another notebook.
 
-Nothing is downloaded twice. The dataset and the base models go into one downloads folder (`QMSum/` and `models/` inside it). Each notebook checks that folder first and only downloads what is missing. The fine-tuned adapters are saved in `adapters/`, and notebook 2 skips training when an adapter is already there (set `RETRAIN = True` to train again). The downloads folder is `downloads/` next to the notebooks on Colab and the server, and `~/smalltalk_downloads` on the laptop so the large model files are not synced by OneDrive. Set `DOWNLOADS` in `config.py` to use another folder.
+Nothing is downloaded twice. The dataset and the base models go into one downloads folder (`QMSum/` and `models/` inside it). Each notebook checks that folder first and only downloads what is missing. The fine-tuned adapters are saved in `adapters/`, and notebook 2 skips training when an adapter is already there (set `RETRAIN = True` to train again). The downloads folder is `downloads/` next to the notebooks on the server, and `~/smalltalk_downloads` on a local computer so the large model files stay out of a cloud-synced project folder. On Colab it is `/content/downloads` on the Colab disk, because the models are too large for a free Google Drive. That folder is emptied when the Colab session ends, so models download again in a new session. Results and fine-tuned adapters are still saved on Drive. Set `DOWNLOADS` in `config.py` to use another folder.
 
 `RUN_ON` in `config.py` says where the notebooks run:
 
@@ -122,7 +124,7 @@ Nothing is downloaded twice. The dataset and the base models go into one downloa
 |---|---|---|
 | `'colab'` | Google Colab with a T4 GPU | Batch size 4, everything runs |
 | `'server'` | Remote GPU server | Batch size 8, everything runs |
-| `'local'` | Laptop with a 6 GB GPU | Batch size 1, the 8B/9B models are skipped, training is not recommended |
+| `'local'` | Computer with a small GPU (under 12 GB) | Batch size 1, the 8B/9B models are skipped, training is not recommended |
 | `'auto'` | Detects one of the above | Default |
 
 The setting only changes speed and what fits in memory. It never changes an experiment setting, so results from different machines can be combined.

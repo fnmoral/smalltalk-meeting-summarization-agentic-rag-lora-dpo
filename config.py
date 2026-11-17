@@ -5,26 +5,37 @@ Edit a value, save, then run the Config cell of the notebook again.
 
 # Where it runs
 
-RUN_ON = 'auto'    # 'local' (6GB laptop), 'colab' (T4), 'server' (remote GPU server) or 'auto' to detect
+RUN_ON = 'auto'    # 'local' (GPU under 12 GB), 'colab' (T4), 'server' (remote GPU server) or 'auto' to detect
 DOWNLOADS = None   # folder for the dataset and base models, None uses the profile default below
 
 # per machine: only speed and what fits in memory change, never the experiment itself
 # 'downloads' paths that are not absolute start at the working folder
 PROFILES = {
-    # 6GB laptop GPU. downloads stay outside OneDrive so 17GB of models are not synced to the cloud
+    # a computer with a small GPU (under 12 GB): 4B models only, one question at a time
+    # downloads go to the home folder so large model files stay out of a cloud-synced project folder
     'local': {'batch_size': 1, 'big_models': False, 'train': False, 'downloads': '~/smalltalk_downloads'},
-    # T4 16GB. the working folder is on Google Drive, so downloads survive a disconnect
-    'colab': {'batch_size': 4, 'big_models': True, 'train': True, 'downloads': 'downloads'},
+    # T4 16GB. downloads go to the Colab disk, the models are too big for a free Google Drive
+    'colab': {'batch_size': 2, 'big_models': True, 'train': True, 'downloads': '/content/downloads'},
     # remote GPU server, lower the batch size if its GPU is small
     'server': {'batch_size': 8, 'big_models': True, 'train': True, 'downloads': 'downloads'},
 }
 
 # Models (key = short name used in file names, value = Hugging Face ID)
 
-SMALL_MODELS = {'qwen3_4b': 'Qwen/Qwen3-4B', 'qwen35_4b': 'Qwen/Qwen3.5-4B'}   # fine-tuned
-BIG_MODELS = {'qwen3_8b': 'Qwen/Qwen3-8B', 'qwen35_9b': 'Qwen/Qwen3.5-9B',
-              'ministral3_8b': 'mistralai/Ministral-3-8B-Instruct-2512-BF16'}  # comparison only
-FAMILY = {'qwen3_4b': 'qwen3_8b', 'qwen35_4b': 'qwen35_9b'}   # same-family big model for each small model
+# the Qwen3.5 pair is switched off for now, remove the '#' on its three lines to run it too
+SMALL_MODELS = {
+    'qwen3_4b': 'Qwen/Qwen3-4B',
+    # 'qwen35_4b': 'Qwen/Qwen3.5-4B',
+}   # fine-tuned
+BIG_MODELS = {
+    'qwen3_8b': 'Qwen/Qwen3-8B',
+    # 'qwen35_9b': 'Qwen/Qwen3.5-9B',
+    'ministral3_8b': 'mistralai/Ministral-3-8B-Instruct-2512-BF16',
+}   # comparison only
+FAMILY = {
+    'qwen3_4b': 'qwen3_8b',
+    # 'qwen35_4b': 'qwen35_9b',
+}   # same-family big model for each small model
 CROSS_FAMILY = 'ministral3_8b'                                # big model from another family
 LOAD_4BIT = True   # same 4-bit setting for every model keeps the comparison fair
 
@@ -44,6 +55,7 @@ PIECE_WORDS = 150        # a longer speaker turn is cut into pieces of this many
 CHUNK_OVERLAP = 1        # pieces shared between one chunk and the next
 ZEROSHOT_TOKENS = 6000   # zeroshot mode reads this many tokens from the start of the transcript
 MAX_NEW_TOKENS = 350     # longest answer a model may write
+PREFILL_CHUNK = 1024     # a longer prompt is read in pieces of this many tokens to save GPU memory
 TOP_P = 0.95             # only used when sampling (DPO candidates), test runs are greedy
 
 # Agent
@@ -80,7 +92,7 @@ AGENT_LAST_CALL = 'You have used all your actions. Write the Final Answer now.'
 
 # Fine-tuning (notebook 2)
 
-MODEL_KEY = 'qwen3_4b'   # the small model to fine-tune, then run notebook 2 again with 'qwen35_4b'
+MODEL_KEY = 'qwen3_4b'   # the small model to fine-tune (run notebook 2 once per small model)
 RETRAIN = False          # False reuses a saved adapter instead of training again
 MAX_LEN = 3072           # most tokens in one training example (prompt + answer)
 PROMPT_RESERVE = 300     # tokens kept free for the system prompt, question and chat template
