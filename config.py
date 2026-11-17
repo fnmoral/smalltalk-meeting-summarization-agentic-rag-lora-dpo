@@ -5,7 +5,7 @@ Edit a value, save, then run the Config cell of the notebook again.
 
 # Where it runs
 
-RUN_ON = 'auto'    # 'local' (6GB laptop), 'colab' (T4), 'server' (Fanshawe) or 'auto' to detect
+RUN_ON = 'auto'    # 'local' (6GB laptop), 'colab' (T4), 'server' (remote GPU server) or 'auto' to detect
 DOWNLOADS = None   # folder for the dataset and base models, None uses the profile default below
 
 # per machine: only speed and what fits in memory change, never the experiment itself
@@ -15,7 +15,7 @@ PROFILES = {
     'local': {'batch_size': 1, 'big_models': False, 'train': False, 'downloads': '~/smalltalk_downloads'},
     # T4 16GB. the working folder is on Google Drive, so downloads survive a disconnect
     'colab': {'batch_size': 4, 'big_models': True, 'train': True, 'downloads': 'downloads'},
-    # Fanshawe server, lower the batch size if its GPU is small
+    # remote GPU server, lower the batch size if its GPU is small
     'server': {'batch_size': 8, 'big_models': True, 'train': True, 'downloads': 'downloads'},
 }
 

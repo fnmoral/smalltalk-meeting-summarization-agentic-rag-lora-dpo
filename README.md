@@ -121,7 +121,7 @@ Nothing is downloaded twice. The dataset and the base models go into one downloa
 | `RUN_ON` | Machine | What changes |
 |---|---|---|
 | `'colab'` | Google Colab with a T4 GPU | Batch size 4, everything runs |
-| `'server'` | Fanshawe server | Batch size 8, everything runs |
+| `'server'` | Remote GPU server | Batch size 8, everything runs |
 | `'local'` | Laptop with a 6 GB GPU | Batch size 1, the 8B/9B models are skipped, training is not recommended |
 | `'auto'` | Detects one of the above | Default |
 
