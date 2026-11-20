@@ -48,7 +48,7 @@ flowchart LR
 ```
 
 - **SFT (supervised fine-tuning):** the model sees a question, the related chunks, and the summary a person wrote. It learns to write in that style. About a third of the examples are written as agent conversations, so it also learns when to use a tool (see below).
-- **DPO (direct preference optimization):** the trained model writes 4 summaries for the same question. Each one is scored on how well it sticks to the chunks and how close it is to the human summary. The best and the worst become a pair, and the model learns to prefer the best one.
+- **DPO (direct preference optimization):** the trained model writes 4 summaries for the same question, one the way it answers at test time and three with some randomness. Each one is scored on how well it sticks to the chunks, how close it is to the human summary in words and in length, and whether it repeats itself. The best and the worst become a pair, and the model learns to prefer the best one.
 - **LoRA:** we do not retrain the whole model. We train a small add-on (an adapter) on top of the model loaded in 4-bit (QLoRA), which is what makes training possible on a laptop GPU.
 
 ## Models
@@ -72,10 +72,14 @@ Every model is loaded in 4-bit and answers the same 150 test questions, so the c
 |---|---|
 | ROUGE-1/2/L | How many words and phrases match the human summary |
 | BERTScore | How close the meaning is to the human summary |
-| Faithfulness (HHEM) | Is the summary supported by the text the model read? Under 0.5 counts as a hallucination |
+| Faithfulness (HHEM) | Is the summary supported by the text the model read? Under 0.5 counts as a hallucination. Not scored in `zeroshot` mode, whose 6,000-token input needs about 7 GB of GPU memory in HHEM |
 | Hit, Recall, Precision, MRR | Did the search find the chunks that hold the answer? |
+| Loop rate | Share of answers stuck repeating a phrase (under 80% distinct 4-grams) |
 | Tool use rate, format errors | How the agent behaved |
 | Gap closed | `(tuned small - base small) / (bigger model - base small)`. 0 means no progress, 1 means the small model caught up, above 1 means it passed the bigger model |
+| Time | Seconds per answer for every run, and minutes for each training step (SFT data, SFT, DPO candidates, DPO) |
+| GPU memory | Peak GPU memory of every run and training step |
+| Compute (FLOPs) | Estimated from the tokens each model read and wrote: 2 x parameters x tokens to answer, 6 x for SFT with LoRA, 8 x for DPO |
 
 Two extra checks for the agent:
 
@@ -110,7 +114,11 @@ The bigger models are not trained, so this does not change the baselines. The to
 
 **Small differences are tested.** Summary scores between models are often close, so every comparison with the tuned small model gets a 95% interval from a paired bootstrap over the same test questions. A difference only counts if the interval does not include 0.
 
-**Training examples are capped at 2,048 tokens.** Qwen's vocabulary is large (about 152,000 tokens), so the training step that scores every next word needs a lot of memory. 2,048 tokens keeps training inside a small GPU. A training prompt holds about 5 or 6 chunks instead of 8, but the gold evidence always goes in first. DPO prompts are cut the same way, so the summaries being compared are never cut off.
+**Training examples are capped at 3,072 tokens.** This holds a median of 8 chunks plus the answer, the same as at test time. Measured on the longest examples, SFT of the 1.7B model peaks at about 3.4 GB of GPU memory and DPO at about 2.8 GB, so both fit on a small GPU. DPO prompts are cut to the same limit together with the longest possible answer, so the summaries being compared are never cut off.
+
+**Cost is measured, not only quality.** A small model is only worth it if it is also cheaper, so every answer saves its time, its GPU and its token counts, and every training step logs its time, peak GPU memory and tokens to `results/timings.csv`. FLOPs are estimated with the standard rule from Kaplan et al. (2020): a forward pass costs about 2 FLOPs per parameter per token. SFT with LoRA costs about 6, because the gradients still pass back through the frozen model and gradient checkpointing repeats the forward pass. DPO costs about 8, because the frozen reference model adds another forward pass. Loading in 4-bit saves memory but not FLOPs, since the GPU computes in 16-bit. Times are only compared on the same GPU. The Qwen3-4B runs were made on Colab before timing was added, so notebook 1 times a sample of 20 questions again on the local GPU. The 8B reference does not fit on a small GPU, so its time is not reported.
+
+**DPO also fixes repetition loops.** Test answers use greedy decoding (always the most likely next word) so results can be repeated. After SFT, the small model sometimes got stuck repeating a phrase with greedy decoding, in about a quarter of its answers, while no base model did. The first DPO run sampled all 4 candidates with randomness, and sampled answers almost never loop, so DPO never saw the problem. Now one candidate is written greedily, and the score is multiplied by the share of distinct 4-grams, so a loop always ends up as the rejected summary. The DPO learning rate was also raised from 5e-6 to 5e-5, because the lower rate barely changed the LoRA adapter. That run fixed the loops but made answers half the human length, so the score is now also multiplied by the length ratio to the human summary, and the SFT loss on the chosen summary is added to the DPO loss (RPO), which keeps the model close to the good summaries. A repetition penalty at test time was not used, because it would change the answers of every model and the baselines would need to be rerun. See `report_notes.md` for the numbers.
 
 **DPO uses different questions than SFT.** 300 training questions are kept aside for DPO only, so the model is not judged on summaries it already memorized.
 
@@ -126,6 +134,11 @@ The bigger models are not trained, so this does not change the baselines. The to
 | `1_data_rag_baselines.ipynb` | Data overview, search quality, and base results for every model |
 | `2_lora_sft_dpo.ipynb` | SFT and DPO training for one small model at a time |
 | `3_final_evaluation.ipynb` | Runs the trained models and builds all tables and charts |
+| `report_notes.md` | Changes made during the project and the reason for each, for the report |
+| `runs/` | Every model answer, one jsonl file per run (`<model>_<stage>_<mode>`), with the context it read, its tool calls, time and token counts |
+| `results/` | Result tables (csv), the main chart, saved faithfulness scores (`faith/`), training logs and the timing log |
+| `data/` | The DPO candidates: 4 summaries per DPO question with their faithfulness and ROUGE-L scores |
+| `old_runs/` | Answers and tables of the two earlier DPO attempts, described in `report_notes.md` |
 
 ## How to run
 
@@ -150,8 +163,8 @@ On Colab, put `smalltalk.py`, `config.py` and `requirements.txt` in `MyDrive/sma
 
 ## Status
 
-- Baselines done for Qwen3-4B (zeroshot, rag, agent) and Qwen3-8B (rag, agent)
-- Still to run: Qwen3-1.7B baselines, Ministral 3 3B baselines, SFT and DPO training, final evaluation
+- Baselines done for every model, SFT done
+- All runs done. In agent mode the tuned 1.7B beats Qwen3-4B, Qwen3-8B and Ministral 3 3B on ROUGE-L and faithfulness (all differences significant), with BERTScore level. See `results/` and `report_notes.md`
 
 Search quality on the 130 test questions with gold spans: MRR 0.648, Hit@8 0.915, Recall@8 0.566.
 

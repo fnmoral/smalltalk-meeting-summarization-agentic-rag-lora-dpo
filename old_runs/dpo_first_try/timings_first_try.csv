@@ -1,0 +1,5 @@
+step,model,seconds,peak_gb,tokens,tflops,gpu,stopped,when
+dpo_candidates,qwen3_17b,87.0,4.82,26384,89.7,local GPU,True,2026-11-20T02:06:47
+sft_data,qwen3_17b,71.4,0.36,0,0.0,local GPU,False,2026-11-20T02:09:00
+dpo_candidates,qwen3_17b,3375.3,3.9,2449297,8327.6,local GPU,False,2026-11-20T03:05:44
+dpo_train,qwen3_17b,1374.6,2.84,972289,13223.1,local GPU,False,2026-11-20T03:29:07

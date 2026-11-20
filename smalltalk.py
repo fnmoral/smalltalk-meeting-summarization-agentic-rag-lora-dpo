@@ -7,6 +7,7 @@ import gc
 import json
 import random
 import re
+import time
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +40,66 @@ def gpu_gb():
     # GPU memory held by this notebook right now
     import torch
     return torch.cuda.memory_allocated() / 2**30 if torch.cuda.is_available() else 0.0
+
+
+def gpu_name():
+    import torch
+    return torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu'
+
+
+TIMING_FIELDS = ['step', 'model', 'seconds', 'peak_gb', 'tokens', 'tflops', 'gpu', 'stopped', 'when']
+
+# estimated FLOPs per token per parameter (Kaplan et al. 2020): a forward pass is 2, SFT with LoRA is 6
+# (forward, gradients through the frozen base, and the forward repeated by gradient checkpointing),
+# DPO is 8 (the same plus a forward pass of the frozen reference model)
+FLOPS_PER_PARAM = {'answer': 2, 'sft': 6, 'dpo': 8}
+
+
+def flops_per_token(key, kind):
+    # 4-bit loading does not change this, the GPU computes in 16-bit
+    return FLOPS_PER_PARAM[kind] * cfg.PARAMS_B.get(key, 0) * 1e9
+
+
+def log_time(step, model, seconds, peak_gb, tokens=0, tflops=0.0, stopped=False, path='results/timings.csv'):
+    """Adds one timed step to a csv. Time, memory and compute are reported next to the quality scores."""
+    import csv
+    import datetime
+    new = not Path(path).exists()
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, 'a', newline='', encoding='utf-8') as f:
+        w = csv.DictWriter(f, fieldnames=TIMING_FIELDS)
+        if new:
+            w.writeheader()
+        w.writerow({'step': step, 'model': model, 'seconds': round(seconds, 1), 'peak_gb': round(peak_gb, 2),
+                    'tokens': int(tokens), 'tflops': round(tflops, 1), 'gpu': gpu_name(), 'stopped': stopped,
+                    'when': datetime.datetime.now().isoformat(timespec='seconds')})
+
+
+class Timer:
+    """Times a step (for example SFT training) with its peak GPU memory and logs it with log_time.
+    Set .tokens and .flops_per_token inside the block to log the estimated compute too.
+    A step stopped by an error is still logged and marked as stopped, so resumed steps can be added up."""
+
+    def __init__(self, step, model):
+        self.step, self.model = step, model
+        self.tokens, self.flops_per_token = 0, 0.0
+
+    def __enter__(self):
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+        self.start = time.time()
+        return self
+
+    def __exit__(self, kind, err, tb):
+        import torch
+        peak = torch.cuda.max_memory_allocated() / 2**30 if torch.cuda.is_available() else 0.0
+        seconds = time.time() - self.start
+        tflops = self.tokens * self.flops_per_token / 1e12
+        log_time(self.step, self.model, seconds, peak, self.tokens, tflops, stopped=kind is not None)
+        print(f'{self.step} ({self.model}): {seconds / 60:.1f} min, peak GPU memory {peak:.1f} GB'
+              + (f', {self.tokens:,} tokens, about {tflops:,.0f} TFLOPs' if self.tokens else ''))
+        return False
 
 
 def setup_downloads(path):
@@ -434,6 +495,7 @@ class LLM:
             self.tok.pad_token = self.tok.eos_token
         # Mistral tokenizers must build the ids from the messages, encoding the prompt text would turn [INST] into plain text
         self.ids_template = 'MistralCommon' in type(self.tok).__name__
+        self.tokens_in = self.tokens_out = 0   # running totals, used for the FLOPs estimate
         self.device = next(self.model.parameters()).device
         self.torch = torch
         print(f'Loaded {model_id}: {gpu_gb():.1f} GB of GPU memory in use'
@@ -465,6 +527,12 @@ class LLM:
         mask = self.torch.tensor([[0] * (n - len(x)) + [1] * len(x) for x in ids_list], device=self.device)
         return {'input_ids': ids, 'attention_mask': mask}
 
+    def _count(self, enc, out):
+        # prompt tokens (each returned sequence reads the prompt) and new tokens, padding left out
+        copies = out.shape[0] // enc['input_ids'].shape[0]
+        self.tokens_in += int(enc['attention_mask'].sum()) * copies
+        self.tokens_out += int((out[:, enc['input_ids'].shape[1]:] != self.tok.pad_token_id).sum())
+
     def count_tokens(self, text):
         return len(self.tok(text, add_special_tokens=False)['input_ids'])
 
@@ -490,6 +558,7 @@ class LLM:
             if n == 1 and enc['input_ids'].shape[1] > cfg.PREFILL_CHUNK:
                 kw['past_key_values'] = self._prefill(enc['input_ids'])
             out = self.model.generate(**enc, num_return_sequences=n, **kw)
+        self._count(enc, out)
         texts = [clean_output(self.tok.decode(o[enc['input_ids'].shape[1]:], skip_special_tokens=True))
                  for o in out]
         return texts if n > 1 else texts[0]
@@ -509,6 +578,7 @@ class LLM:
         enc = self._tensors([self.encode(msgs) for msgs in batch])
         with self.torch.no_grad():
             out = self.model.generate(**enc, **self._gen_kwargs(max_new_tokens, temperature, None))
+        self._count(enc, out)
         return [clean_output(self.tok.decode(o[enc['input_ids'].shape[1]:], skip_special_tokens=True))
                 for o in out]
 
@@ -616,16 +686,36 @@ def read_jsonl(path):
 
 def run_experiment(llm, mode, examples, meetings_by_id, retriever, out_path, k=cfg.K,
                    zeroshot_tokens=cfg.ZEROSHOT_TOKENS, batch_size=4, max_new_tokens=cfg.MAX_NEW_TOKENS):
-    """mode is 'zeroshot', 'rag' or 'agent'."""
-    from tqdm.auto import tqdm
+    """mode is 'zeroshot', 'rag' or 'agent'. Each answer also saves its time, GPU and token counts,
+    and the session's time and peak GPU memory go to results/timings.csv."""
     done = done_keys(out_path)
     todo = [ex for ex in examples if (ex['meeting_id'], ex['query']) not in done]
     print(f'{mode}: {len(done)} done, {len(todo)} to go -> {out_path}')
+    if todo:
+        start_tokens = llm.tokens_in + llm.tokens_out
+        with Timer(f'answer_{mode}', Path(out_path).stem) as timer:
+            timer.flops_per_token = flops_per_token(parse_run_name(Path(out_path).stem)[0], 'answer')
+            try:
+                _answer(llm, mode, todo, meetings_by_id, retriever, out_path, k, zeroshot_tokens, batch_size, max_new_tokens)
+            finally:
+                timer.tokens = llm.tokens_in + llm.tokens_out - start_tokens
+
+
+def _answer(llm, mode, todo, meetings_by_id, retriever, out_path, k, zeroshot_tokens, batch_size, max_new_tokens):
+    from tqdm.auto import tqdm
+    gpu = gpu_name()
+
+    def cost(start, tokens, share=1):
+        # time and tokens since start, a batch shares them equally between its questions
+        return {'seconds': round((time.time() - start) / share, 2), 'gpu': gpu,
+                'tokens_in': round((llm.tokens_in - tokens[0]) / share), 'tokens_out': round((llm.tokens_out - tokens[1]) / share)}
+
     if mode == 'agent':
         for ex in tqdm(todo):
             m = meetings_by_id[ex['meeting_id']]
+            start, tokens = time.time(), (llm.tokens_in, llm.tokens_out)
             res = run_agent(llm, m, ex, retriever, k=k, max_new_tokens=max_new_tokens)
-            append_jsonl(out_path, {**ex, **res, 'mode': mode})
+            append_jsonl(out_path, {**ex, **res, 'mode': mode, **cost(start, tokens)})
         return
     if mode == 'zeroshot':
         batch_size = 1  # prompts of 6,000 tokens are too big to batch, attention memory grows with length squared
@@ -640,6 +730,7 @@ def run_experiment(llm, mode, examples, meetings_by_id, retriever, out_path, k=c
                 ctx, _ = rag_context(m, ex, retriever, k=k)
                 batch.append(summary_messages(ctx, ex['query']))
             contexts.append(ctx)
+        start, tokens = time.time(), (llm.tokens_in, llm.tokens_out)
         try:
             preds = llm.chat_batch(batch, max_new_tokens=max_new_tokens)
         except RuntimeError as e:
@@ -650,8 +741,19 @@ def run_experiment(llm, mode, examples, meetings_by_id, retriever, out_path, k=c
             # the batch did not fit in GPU memory, so these questions are answered one at a time
             free_memory()
             preds = [llm.chat_batch([msgs], max_new_tokens=max_new_tokens)[0] for msgs in batch]
+        c = cost(start, tokens, len(group))
         for ex, ctx, pred in zip(group, contexts, preds):
-            append_jsonl(out_path, {**ex, 'pred': pred, 'context': ctx, 'mode': mode})
+            append_jsonl(out_path, {**ex, 'pred': pred, 'context': ctx, 'mode': mode, **c})
+
+
+def has_timing(path):
+    rows = read_jsonl(path) if Path(path).exists() else []
+    return bool(rows) and 'seconds' in rows[0]
+
+
+def time_sample(examples, n=cfg.TIME_SAMPLE):
+    # evenly spread questions, so the sample keeps the general/specific mix of the test subset
+    return examples[::max(len(examples) // n, 1)][:n]
 
 
 def test_subset(examples, n=None, seed=cfg.SEED):
@@ -758,11 +860,41 @@ def agent_sft_rows(examples, meetings_by_id, retriever, tok, k=cfg.K, max_length
     return rows
 
 
-def score_candidates(candidates, context, answer, faith, weight=cfg.REWARD_FAITH_WEIGHT):
-    # reward = weight * faithfulness to the context + (1 - weight) * ROUGE-L against the human summary
+def train_tokens(dataset, epochs=1):
+    """Tokens a trainer reads in its tokenized dataset, for the FLOPs estimate."""
+    # SFT rows hold input_ids, DPO rows hold prompt_ids, chosen_ids and rejected_ids (TRL 1.18)
+    cols = [c for c in dataset.column_names if c.endswith('_ids')]
+    n = sum(len(x) for c in cols for x in dataset[c])
+    for c in ('prompt_ids', 'prompt_input_ids'):
+        if c in cols:   # DPO reads the prompt twice, once with each answer
+            n += sum(len(x) for x in dataset[c])
+    return int(n * epochs)
+
+
+def distinct_share(text, n=4):
+    # share of word n-grams that are unique: about 1 for normal text, low for an answer stuck in a loop
+    w = text.lower().split()
+    grams = [tuple(w[i:i + n]) for i in range(len(w) - n + 1)]
+    return len(set(grams)) / len(grams) if grams else 1.0
+
+
+def candidate_reward(candidate, faith_score, rouge_l, answer, weight=cfg.REWARD_FAITH_WEIGHT):
+    # (weight * faithfulness + (1 - weight) * ROUGE-L) * distinct 4-gram share * length ratio to the human summary
+    # a loop repeats words from the context, so HHEM alone may still call it faithful
+    # the length ratio (shorter / longer word count) keeps DPO from learning that shorter is always better
+    w, ref = max(len(candidate.split()), 1), max(len(answer.split()), 1)
+    return (weight * faith_score + (1 - weight) * rouge_l) * distinct_share(candidate) * min(w, ref) / max(w, ref)
+
+
+def score_candidates(candidates, context, answer, faith):
     f = faith.score([context] * len(candidates), candidates)
     r = rouge_l_each(candidates, [answer] * len(candidates))
-    return [weight * a + (1 - weight) * b for a, b in zip(f, r)], f, r
+    return [candidate_reward(c, a, b, answer) for c, a, b in zip(candidates, f, r)], f, r
+
+
+def rescore_candidates(row, answer):
+    # rewards of saved candidates with the current formula, from their saved faithfulness and ROUGE-L
+    return [candidate_reward(c, a, b, answer) for c, a, b in zip(row['candidates'], row['faith'], row['rougeL'])]
 
 
 def best_worst_pair(row, min_gap=cfg.DPO_MIN_GAP):
@@ -821,9 +953,12 @@ class Faithfulness:
             self.kind = 'nli'
         print('Faithfulness scorer:', self.kind)
 
-    def score(self, premises, hypotheses, batch_size=4):
+    def score(self, premises, hypotheses, batch_size=1):
+        # one pair at a time: long contexts in a batch ran out of memory next to a loaded LLM on a small GPU
         if self.kind == 'hhem':
             import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             out = []
             for i in range(0, len(premises), batch_size):
                 pairs = list(zip(premises[i:i + batch_size], hypotheses[i:i + batch_size]))
@@ -844,6 +979,27 @@ class Faithfulness:
         return float(np.mean(scores))
 
 
+def faith_scores(path, faith):
+    """HHEM score of every answer in a run, in row order. Scores are saved in results/faith/ one line at a time,
+    so a crash or a rerun never scores the same answer twice. Modes in FAITH_SKIP_MODES get NaN."""
+    rows = read_jsonl(path)
+    if rows and rows[0].get('mode') in cfg.FAITH_SKIP_MODES:
+        return [float('nan')] * len(rows)
+    cache = Path('results/faith') / Path(path).name
+    done = {}
+    if cache.exists():   # a saved score is only reused if the answer is still the same
+        done = {(r['meeting_id'], r['query']): r for r in read_jsonl(cache)}
+    out = []
+    for r in rows:
+        key, pred = (r['meeting_id'], r['query']), r['pred'] or ''
+        if key not in done or done[key]['pred'] != pred:
+            done[key] = {'meeting_id': key[0], 'query': key[1], 'pred': pred,
+                         'faithfulness': faith.score([r['context'] or ''], [pred])[0]}
+            append_jsonl(cache, done[key])
+        out.append(done[key]['faithfulness'])
+    return out
+
+
 def evaluate_run(path, faith=None, use_bertscore=True):
     rows = read_jsonl(path)
     preds = [r['pred'] or '' for r in rows]
@@ -856,10 +1012,21 @@ def evaluate_run(path, faith=None, use_bertscore=True):
             print('BERTScore failed, skipping it:', repr(e)[:200])
             out['bertscore'] = float('nan')
     if faith is not None:
-        scores = faith.score([r['context'] or '' for r in rows], preds)
-        out['faithfulness'] = float(np.mean(scores))
-        out['hallucination_rate'] = float(np.mean([s < cfg.HALLUCINATION_BELOW for s in scores]))
+        scores = np.array(faith_scores(path, faith))
+        out['faithfulness'] = float(np.mean(scores))   # NaN for skipped modes
+        out['hallucination_rate'] = float(np.mean(scores < cfg.HALLUCINATION_BELOW)) if not np.isnan(scores).any() else float('nan')
     out['avg_words'] = float(np.mean([len(p.split()) for p in preds]))
+    out['loop_rate'] = float(np.mean([distinct_share(p) < cfg.LOOP_BELOW for p in preds]))
+    timed = [r['seconds'] for r in rows if 'seconds' in r]
+    if timed:   # runs made before timing was added have no times
+        out['sec_per_question'] = float(np.mean(timed))
+        out['run_minutes'] = float(np.sum(timed)) / 60
+        out['gpu'] = rows[-1].get('gpu', '')
+    counted = [r['tokens_in'] + r['tokens_out'] for r in rows if 'tokens_in' in r]
+    if counted:
+        out['tokens_per_question'] = float(np.mean(counted))
+        key = parse_run_name(Path(path).stem)[0]
+        out['gflops_per_question'] = float(np.mean(counted)) * flops_per_token(key, 'answer') / 1e9
     if rows and 'trace' in rows[0]:
         out['tool_use_rate'] = float(np.mean([len(r['trace']) > 0 for r in rows]))
         out['avg_tool_calls'] = float(np.mean([len(r['trace']) for r in rows]))
@@ -920,10 +1087,12 @@ def compare_runs(path_a, path_b, faith=None):
     refs = [a[key]['answer'] for key in keys]
     pa, pb = [a[key]['pred'] or '' for key in keys], [b[key]['pred'] or '' for key in keys]
     out = [{'metric': 'rougeL', 'n': len(keys), **paired_bootstrap(rouge_l_each(pa, refs), rouge_l_each(pb, refs))}]
-    if faith is not None:
-        fa = faith.score([a[key]['context'] or '' for key in keys], pa)
-        fb = faith.score([b[key]['context'] or '' for key in keys], pb)
-        out.append({'metric': 'faithfulness', 'n': len(keys), **paired_bootstrap(fa, fb)})
+    if faith is not None:   # saved scores from faith_scores, matched by question
+        sa = dict(zip([(r['meeting_id'], r['query']) for r in read_jsonl(path_a)], faith_scores(path_a, faith)))
+        sb = dict(zip([(r['meeting_id'], r['query']) for r in read_jsonl(path_b)], faith_scores(path_b, faith)))
+        fa, fb = [sa[key] for key in keys], [sb[key] for key in keys]
+        if not np.isnan(fa + fb).any():
+            out.append({'metric': 'faithfulness', 'n': len(keys), **paired_bootstrap(fa, fb)})
     return out
 
 

@@ -36,7 +36,9 @@ FAMILY = {
 }   # same-family bigger model for each small model
 CROSS_FAMILY = 'ministral3_3b'   # bigger model from another family
 REFERENCE = ['qwen3_8b']         # extra upper reference, needs a 16 GB GPU (its runs were made on Colab)
-PARAMS_B = {'qwen3_17b': 1.7, 'qwen3_4b': 4.0, 'ministral3_3b': 3.8, 'qwen3_8b': 8.2}   # used to skip models a GPU can't hold
+# billions of parameters, used to skip models a GPU can't hold and to estimate FLOPs
+# (Ministral counts its language model only, its unused vision part adds 0.4B)
+PARAMS_B = {'qwen3_17b': 1.7, 'qwen3_4b': 4.0, 'ministral3_3b': 3.4, 'qwen3_8b': 8.2}
 LOAD_4BIT = True   # same 4-bit setting for every model keeps the comparison fair
 
 EMBED_MODEL = 'BAAI/bge-small-en-v1.5'
@@ -57,6 +59,7 @@ ZEROSHOT_TOKENS = 6000   # zeroshot mode reads this many tokens from the start o
 MAX_NEW_TOKENS = 350     # longest answer a model may write
 PREFILL_CHUNK = 1024     # a longer prompt is read in pieces of this many tokens to save GPU memory
 TOP_P = 0.95             # only used when sampling (DPO candidates), test runs are greedy
+TIME_SAMPLE = 20         # runs made on another GPU are timed again on this one with this many questions
 
 # Agent
 
@@ -94,7 +97,7 @@ AGENT_LAST_CALL = 'You have used all your actions. Write the Final Answer now.'
 
 MODEL_KEY = 'qwen3_17b'  # the small model to fine-tune (run notebook 2 once per small model)
 RETRAIN = False          # False reuses a saved adapter instead of training again
-MAX_LEN = 2048           # most tokens in one training example (prompt + answer), 2048 keeps training inside a small GPU
+MAX_LEN = 3072           # most tokens in one training example (prompt + answer), the 1.7B model trains in about 3.5 GB at this length
 PROMPT_RESERVE = 300     # tokens kept free for the system prompt, question and chat template
 GOLD_CHUNKS = 2          # gold evidence chunks added to each SFT prompt
 N_DPO = 300              # train questions kept aside for DPO only
@@ -115,18 +118,23 @@ SFT = dict(num_train_epochs=1, learning_rate=2e-4, lr_scheduler_type='cosine', w
            gradient_checkpointing=True, logging_steps=10, save_steps=20, save_total_limit=2)   # about 120 steps, a checkpoint every 20 limits what a disconnect loses
 SFT_EVAL_STEPS = 50
 
-DPO_CANDIDATES = 4          # summaries sampled per question
-DPO_TEMPERATURE = 0.9
+DPO_CANDIDATES = 4          # summaries per question
+DPO_GREEDY = 1              # of those, written greedily like at test time, so greedy repetition loops get into the pairs
+DPO_TEMPERATURE = 0.9       # the rest are sampled
 DPO_MAX_NEW_TOKENS = 300
-REWARD_FAITH_WEIGHT = 0.5   # reward = this x faithfulness + the rest x ROUGE-L
+REWARD_FAITH_WEIGHT = 0.5   # reward = (this x faithfulness + the rest x ROUGE-L) x distinct 4-gram share x length ratio
 DPO_MIN_GAP = 0.1           # best vs worst pairs with a smaller reward gap are dropped
 
-DPO = dict(beta=0.1, num_train_epochs=1, learning_rate=5e-6, lr_scheduler_type='cosine', warmup_steps=5,
+# 5e-6 barely moved the LoRA adapter in the first run (loss 0.693 to 0.688), LoRA DPO usually needs about 10x more
+# 'sft' adds the SFT loss on the chosen summary (RPO), so DPO can't drift to very short answers
+DPO = dict(beta=0.1, loss_type=['sigmoid', 'sft'], loss_weights=[1.0, 1.0], num_train_epochs=1, learning_rate=5e-5, lr_scheduler_type='cosine', warmup_steps=5,
            per_device_train_batch_size=1, per_device_eval_batch_size=1, gradient_accumulation_steps=8,
            gradient_checkpointing=True, logging_steps=5, eval_steps=20, save_steps=10, save_total_limit=2)   # about 30 steps in total
 
 # Evaluation (notebook 3)
 
 HALLUCINATION_BELOW = 0.5                      # a faithfulness score under this counts as a hallucination
+LOOP_BELOW = 0.8                               # an answer with a smaller share of distinct 4-grams counts as a repetition loop
+FAITH_SKIP_MODES = ['zeroshot']                # zeroshot reads 6,000 tokens, too long for HHEM on a small GPU (needs about 7 GB)
 GAP_MODE = 'agent'                             # mode used for the gap-closed table and the main chart
 FINAL_RUN = 'runs/qwen3_17b_dpo_agent.jsonl'   # run shown in the error analysis

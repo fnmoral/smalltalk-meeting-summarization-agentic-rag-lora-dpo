@@ -1,0 +1,13 @@
+run,group,n,tool_use_rate
+ministral3_3b_base_agent,start had the evidence,119,0.957983193277311
+ministral3_3b_base_agent,start missed the evidence,11,0.9090909090909091
+qwen3_17b_base_agent,start had the evidence,119,0.008403361344537815
+qwen3_17b_base_agent,start missed the evidence,11,0.09090909090909091
+qwen3_17b_dpo_agent,start had the evidence,119,0.18487394957983194
+qwen3_17b_dpo_agent,start missed the evidence,11,0.6363636363636364
+qwen3_17b_sft_agent,start had the evidence,119,0.14285714285714285
+qwen3_17b_sft_agent,start missed the evidence,11,0.6363636363636364
+qwen3_4b_base_agent,start had the evidence,119,0.01680672268907563
+qwen3_4b_base_agent,start missed the evidence,11,0.0
+qwen3_8b_base_agent,start had the evidence,119,0.4117647058823529
+qwen3_8b_base_agent,start missed the evidence,11,0.45454545454545453

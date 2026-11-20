@@ -1,0 +1,5 @@
+model,step,gpu,minutes,sessions,peak_gb,tokens,tflops
+qwen3_17b,sft_data,local GPU,1.065,1,0.36,0,0.0
+qwen3_17b,sft_train,local GPU,33.345,1,2.27,2318119,23644.8
+qwen3_17b,dpo_candidates,local GPU,90.83,2,3.39,2440654,8298.2
+qwen3_17b,dpo_train,local GPU,25.62,1,2.85,1048684,14262.1

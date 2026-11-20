@@ -1,0 +1,17 @@
+step,model,seconds,peak_gb,tokens,tflops,gpu,stopped,when
+answer_zeroshot,qwen3_17b_base_zeroshot,1045.9,2.62,889170,3023.2,local GPU,False,2026-11-19T22:11:01
+answer_rag,qwen3_17b_base_rag,497.3,2.36,327624,1113.9,local GPU,False,2026-11-19T22:19:18
+answer_agent,qwen3_17b_base_agent,1440.4,2.41,389122,1323.0,local GPU,False,2026-11-19T22:43:19
+answer_rag,ministral3_3b_base_rag,807.6,3.67,344525,2342.8,local GPU,False,2026-11-19T22:57:06
+answer_agent,ministral3_3b_base_agent,3171.6,3.66,1361900,9260.9,local GPU,False,2026-11-19T23:50:11
+answer_rag,qwen3_4b_base_rag,128.1,3.92,42460,339.7,local GPU,False,2026-11-19T23:54:20
+answer_agent,qwen3_4b_base_agent,158.1,3.65,48520,388.2,local GPU,False,2026-11-19T23:56:59
+sft_data,qwen3_17b,63.9,0.36,0,0.0,local GPU,False,2026-11-20T01:29:36
+sft_train,qwen3_17b,2000.7,2.27,2318119,23644.8,local GPU,False,2026-11-20T02:04:58
+answer_rag,qwen3_17b_sft_rag,778.7,2.67,324342,1102.8,local GPU,False,2026-11-20T05:13:10
+dpo_candidates,qwen3_17b,1405.0,3.39,634570,2157.5,local GPU,True,2026-11-20T06:47:40
+dpo_candidates,qwen3_17b,4044.8,3.39,1806084,6140.7,local GPU,False,2026-11-20T08:26:01
+answer_agent,qwen3_17b_sft_agent,1315.4,2.37,383753,1304.8,local GPU,False,2026-11-20T09:43:06
+dpo_train,qwen3_17b,1537.2,2.85,1048684,14262.1,local GPU,False,2026-11-20T15:42:39
+answer_rag,qwen3_17b_dpo_rag,754.3,2.67,323560,1100.1,local GPU,False,2026-11-20T17:54:11
+answer_agent,qwen3_17b_dpo_agent,1402.0,2.37,449341,1527.8,local GPU,False,2026-11-20T18:17:33
