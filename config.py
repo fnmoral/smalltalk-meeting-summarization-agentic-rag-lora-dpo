@@ -9,34 +9,34 @@ RUN_ON = 'auto'    # 'local' (GPU under 12 GB), 'colab' (T4), 'server' (remote G
 DOWNLOADS = None   # folder for the dataset and base models, None uses the profile default below
 
 # per machine: only speed and what fits in memory change, never the experiment itself
+# 'max_params_b' = biggest model (billions of parameters) this GPU runs, bigger ones are skipped
 # 'downloads' paths that are not absolute start at the working folder
 PROFILES = {
-    # a computer with a small GPU (under 12 GB): 4B models only, one question at a time
+    # a computer with a small GPU (under 12 GB): models up to 4B, training the 1.7B model fits
     # downloads go to the home folder so large model files stay out of a cloud-synced project folder
-    'local': {'batch_size': 1, 'big_models': False, 'train': False, 'downloads': '~/smalltalk_downloads'},
+    'local': {'batch_size': 2, 'max_params_b': 4.5, 'train': True, 'downloads': '~/smalltalk_downloads'},
     # T4 16GB. downloads go to the Colab disk, the models are too big for a free Google Drive
-    'colab': {'batch_size': 2, 'big_models': True, 'train': True, 'downloads': '/content/downloads'},
+    'colab': {'batch_size': 2, 'max_params_b': 9.5, 'train': True, 'downloads': '/content/downloads'},
     # remote GPU server, lower the batch size if its GPU is small
-    'server': {'batch_size': 8, 'big_models': True, 'train': True, 'downloads': 'downloads'},
+    'server': {'batch_size': 8, 'max_params_b': 9.5, 'train': True, 'downloads': 'downloads'},
 }
 
 # Models (key = short name used in file names, value = Hugging Face ID)
 
-# the Qwen3.5 pair is switched off for now, remove the '#' on its three lines to run it too
 SMALL_MODELS = {
-    'qwen3_4b': 'Qwen/Qwen3-4B',
-    # 'qwen35_4b': 'Qwen/Qwen3.5-4B',
+    'qwen3_17b': 'Qwen/Qwen3-1.7B',
 }   # fine-tuned
 BIG_MODELS = {
+    'qwen3_4b': 'Qwen/Qwen3-4B',
+    'ministral3_3b': 'mistralai/Ministral-3-3B-Instruct-2512-BF16',   # the plain repo is FP8, which needs a newer GPU
     'qwen3_8b': 'Qwen/Qwen3-8B',
-    # 'qwen35_9b': 'Qwen/Qwen3.5-9B',
-    'ministral3_8b': 'mistralai/Ministral-3-8B-Instruct-2512-BF16',
-}   # comparison only
+}   # comparison only, never trained
 FAMILY = {
-    'qwen3_4b': 'qwen3_8b',
-    # 'qwen35_4b': 'qwen35_9b',
-}   # same-family big model for each small model
-CROSS_FAMILY = 'ministral3_8b'                                # big model from another family
+    'qwen3_17b': 'qwen3_4b',
+}   # same-family bigger model for each small model
+CROSS_FAMILY = 'ministral3_3b'   # bigger model from another family
+REFERENCE = ['qwen3_8b']         # extra upper reference, needs a 16 GB GPU (its runs were made on Colab)
+PARAMS_B = {'qwen3_17b': 1.7, 'qwen3_4b': 4.0, 'ministral3_3b': 3.8, 'qwen3_8b': 8.2}   # used to skip models a GPU can't hold
 LOAD_4BIT = True   # same 4-bit setting for every model keeps the comparison fair
 
 EMBED_MODEL = 'BAAI/bge-small-en-v1.5'
@@ -92,20 +92,27 @@ AGENT_LAST_CALL = 'You have used all your actions. Write the Final Answer now.'
 
 # Fine-tuning (notebook 2)
 
-MODEL_KEY = 'qwen3_4b'   # the small model to fine-tune (run notebook 2 once per small model)
+MODEL_KEY = 'qwen3_17b'  # the small model to fine-tune (run notebook 2 once per small model)
 RETRAIN = False          # False reuses a saved adapter instead of training again
-MAX_LEN = 3072           # most tokens in one training example (prompt + answer)
+MAX_LEN = 2048           # most tokens in one training example (prompt + answer), 2048 keeps training inside a small GPU
 PROMPT_RESERVE = 300     # tokens kept free for the system prompt, question and chat template
 GOLD_CHUNKS = 2          # gold evidence chunks added to each SFT prompt
 N_DPO = 300              # train questions kept aside for DPO only
 N_VAL = 60               # validation questions used during SFT
 SMOKE_STEPS = 5          # training steps in the smoke test
 
+# agent SFT: some training questions are written in the agent format, so the model learns when to use a tool
+AGENT_SFT_SHARE = 0.3        # share of SFT questions in the agent format, the rest use the plain rag format
+AGENT_SFT_TOOL_SHARE = 0.5   # share of those (specific questions) where the gold chunks are hidden and a tool brings them back
+AGENT_PROMPT_RESERVE = 700   # tokens kept free for the agent instructions, tool list, question and chat template
+SFT_THOUGHT_ANSWER = 'The excerpts cover this question.'
+SFT_THOUGHT_TOOL = 'The excerpts do not cover this question well enough, so I will read more of the meeting.'
+
 LORA = dict(r=16, lora_alpha=32, lora_dropout=0.05, target_modules='all-linear')
 
 SFT = dict(num_train_epochs=1, learning_rate=2e-4, lr_scheduler_type='cosine', warmup_steps=10,
            per_device_train_batch_size=1, per_device_eval_batch_size=1, gradient_accumulation_steps=8,
-           gradient_checkpointing=True, logging_steps=10, save_steps=50, save_total_limit=2)
+           gradient_checkpointing=True, logging_steps=10, save_steps=20, save_total_limit=2)   # about 120 steps, a checkpoint every 20 limits what a disconnect loses
 SFT_EVAL_STEPS = 50
 
 DPO_CANDIDATES = 4          # summaries sampled per question
@@ -116,10 +123,10 @@ DPO_MIN_GAP = 0.1           # best vs worst pairs with a smaller reward gap are 
 
 DPO = dict(beta=0.1, num_train_epochs=1, learning_rate=5e-6, lr_scheduler_type='cosine', warmup_steps=5,
            per_device_train_batch_size=1, per_device_eval_batch_size=1, gradient_accumulation_steps=8,
-           gradient_checkpointing=True, logging_steps=5, eval_steps=20, save_steps=50, save_total_limit=2)
+           gradient_checkpointing=True, logging_steps=5, eval_steps=20, save_steps=10, save_total_limit=2)   # about 30 steps in total
 
 # Evaluation (notebook 3)
 
 HALLUCINATION_BELOW = 0.5                      # a faithfulness score under this counts as a hallucination
 GAP_MODE = 'agent'                             # mode used for the gap-closed table and the main chart
-FINAL_RUN = 'runs/qwen3_4b_dpo_agent.jsonl'    # run shown in the error analysis
+FINAL_RUN = 'runs/qwen3_17b_dpo_agent.jsonl'   # run shown in the error analysis

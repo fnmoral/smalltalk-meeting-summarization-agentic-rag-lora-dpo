@@ -1,12 +1,12 @@
 # SmallTalk
 
-**Can Agentic RAG and LoRA-Based DPO Help 4B Models Close the Gap with Larger Models in Meeting Summarization?**
+**Can Agentic RAG and LoRA-Based DPO Help a 1.7B Model Close the Gap with Larger Models in Meeting Summarization?**
 
 NLP 2 class project, Fanshawe College. Author: Francis Neil Moral.
 
 ## The idea in plain words
 
-Small AI models are cheap and can run on a normal laptop, but they usually write worse summaries than bigger models. This project tests whether a small model (4 billion parameters) can get close to a model twice its size if we give it two kinds of help:
+Small AI models are cheap and can run on a normal laptop, but they usually write worse summaries than bigger models. This project tests whether a small model (1.7 billion parameters) can get close to models two to five times its size if we give it two kinds of help:
 
 1. **Better reading.** A one-hour meeting is too long for the model to read at once. So we give it only the parts of the meeting that relate to the question, and tools to look up more if those parts are not enough.
 2. **Extra training.** We train the small model on examples of good meeting summaries, then train it again to prefer summaries that stick to what was actually said.
@@ -41,27 +41,26 @@ RAG means retrieval-augmented generation: search first, then write. "Agentic" me
 
 ```mermaid
 flowchart LR
-    B[Base 4B model] -->|Step 1: SFT<br>learn from human summaries| S[4B + SFT]
-    S -->|Step 2: DPO<br>learn to prefer faithful summaries| D[4B + SFT + DPO]
+    B[Base 1.7B model] -->|Step 1: SFT<br>learn from human summaries<br>and when to use tools| S[1.7B + SFT]
+    S -->|Step 2: DPO<br>learn to prefer faithful summaries| D[1.7B + SFT + DPO]
     D --> E{Compare}
-    G[8B and 9B models<br>not trained] --> E
+    G[3B to 8B models<br>not trained] --> E
 ```
 
-- **SFT (supervised fine-tuning):** the model sees a question, the related chunks, and the summary a person wrote. It learns to write in that style.
+- **SFT (supervised fine-tuning):** the model sees a question, the related chunks, and the summary a person wrote. It learns to write in that style. About a third of the examples are written as agent conversations, so it also learns when to use a tool (see below).
 - **DPO (direct preference optimization):** the trained model writes 4 summaries for the same question. Each one is scored on how well it sticks to the chunks and how close it is to the human summary. The best and the worst become a pair, and the model learns to prefer the best one.
-- **LoRA:** we do not retrain the whole model. We train a small add-on (an adapter), which is what makes training possible on a free Colab GPU.
+- **LoRA:** we do not retrain the whole model. We train a small add-on (an adapter) on top of the model loaded in 4-bit (QLoRA), which is what makes training possible on a laptop GPU.
 
 ## Models
 
-| Role | Model |
-|---|---|
-| Small, fine-tuned | Qwen3-4B |
-| Bigger, same family | Qwen3-8B |
-| Bigger, different family | Ministral 3 8B |
+| Role | Model | Size |
+|---|---|---|
+| Small, fine-tuned | Qwen3-1.7B | 1.7B |
+| Bigger, same family | Qwen3-4B | 4B |
+| Bigger, different family | Ministral 3 3B | 3.8B (3.4B language model + vision part, only text is used) |
+| Extra reference | Qwen3-8B | 8B |
 
-Every model is loaded in 4-bit and answers the same 150 test questions, so the comparison is fair.
-
-A second pair, Qwen3.5-4B and Qwen3.5-9B, is set up in `config.py` but switched off for now. It can be turned on there if time allows.
+Every model is loaded in 4-bit and answers the same 150 test questions, so the comparison is fair. None of the bigger models are trained.
 
 ## Data
 
@@ -76,7 +75,7 @@ A second pair, Qwen3.5-4B and Qwen3.5-9B, is set up in `config.py` but switched 
 | Faithfulness (HHEM) | Is the summary supported by the text the model read? Under 0.5 counts as a hallucination |
 | Hit, Recall, Precision, MRR | Did the search find the chunks that hold the answer? |
 | Tool use rate, format errors | How the agent behaved |
-| Gap closed | `(tuned 4B - base 4B) / (big model - base 4B)`. 0 means no progress, 1 means the small model caught up |
+| Gap closed | `(tuned small - base small) / (bigger model - base small)`. 0 means no progress, 1 means the small model caught up, above 1 means it passed the bigger model |
 
 Two extra checks for the agent:
 
@@ -84,6 +83,13 @@ Two extra checks for the agent:
 - **Did it know when to use a tool?** For questions with gold spans we know if the starting chunks already held the answer. A model with good judgment should use tools more often when they did not.
 
 ## Design choices and why
+
+**A 1.7B model instead of a 4B model.** The project first fine-tuned Qwen3-4B and compared it with Qwen3-8B. Two things changed the plan:
+
+- The first runs showed the base 4B and 8B models were already very close (about 0.01 ROUGE-1 apart). With such a small gap, "gap closed" swings wildly from small changes and says little.
+- Training a 4B model and running 8B models needs a 16 GB GPU, and free cloud GPUs kept disconnecting or running out of quota.
+
+Moving one size down keeps the same question. A 1.7B model can be trained and every comparison model can run on a laptop GPU under 12 GB, and the gap to the 4B model is expected to be larger, so it is easier to see how much of it the training closes. The finished 4B and 8B runs are reused: the 4B becomes the same-family bigger model, and the 8B stays as an extra reference.
 
 **Chunks are capped by words, not by speaker turns.** Committee meetings have very long turns. A chunk of "5 turns" could be 100 words in one meeting and 3,000 in another.
 
@@ -94,6 +100,17 @@ Two extra checks for the agent:
 The prompt has a token limit, so some chunks often have to be dropped. An earlier version put all chunks in meeting order and cut the end. That meant an answer discussed late in the meeting lost its evidence, which brought back the same problem. Now chunks are added by priority until the limit is reached: gold chunks first, then the searched chunks from most to least related. Only after that are they put back in meeting order. The chunks that get dropped are the least related ones, never the evidence.
 
 Gold chunks are never added at test time. That would be cheating, because a real user does not have them.
+
+**The small model is taught when to use a tool.** In the first runs the base Qwen3-4B model called a tool on only 2% of questions, while Qwen3-8B did on almost half. Smaller models are expected to use tools even less. A small model that never uses its tools gets nothing from agentic RAG, so 30% of the SFT examples are written in the agent format. They are built from the gold spans, with no model involved:
+
+- In half of them the starting excerpts hold the evidence, and the target answer is given right away. This teaches the model not to call tools it does not need.
+- In the other half the gold chunks are removed from the starting excerpts on purpose. The target is a tool call that brings them back (checked against the real tool output), followed by the answer. This teaches the model to notice when evidence is missing.
+
+The bigger models are not trained, so this does not change the baselines. The tool checks in notebook 3 show if the trained model uses tools more when its excerpts miss the evidence, and if those answers are better.
+
+**Small differences are tested.** Summary scores between models are often close, so every comparison with the tuned small model gets a 95% interval from a paired bootstrap over the same test questions. A difference only counts if the interval does not include 0.
+
+**Training examples are capped at 2,048 tokens.** Qwen's vocabulary is large (about 152,000 tokens), so the training step that scores every next word needs a lot of memory. 2,048 tokens keeps training inside a small GPU. A training prompt holds about 5 or 6 chunks instead of 8, but the gold evidence always goes in first. DPO prompts are cut the same way, so the summaries being compared are never cut off.
 
 **DPO uses different questions than SFT.** 300 training questions are kept aside for DPO only, so the model is not judged on summaries it already memorized.
 
@@ -122,9 +139,9 @@ Nothing is downloaded twice. The dataset and the base models go into one downloa
 
 | `RUN_ON` | Machine | What changes |
 |---|---|---|
-| `'colab'` | Google Colab with a T4 GPU | Batch size 4, everything runs |
-| `'server'` | Remote GPU server | Batch size 8, everything runs |
-| `'local'` | Computer with a small GPU (under 12 GB) | Batch size 1, the 8B/9B models are skipped, training is not recommended |
+| `'colab'` | Google Colab with a T4 GPU | Batch size 2, everything runs, including the 8B reference |
+| `'server'` | Remote GPU server | Batch size 8, everything runs, including the 8B reference |
+| `'local'` | Computer with a small GPU (under 12 GB) | Batch size 2, models up to 4B run (the 8B reference is skipped), training runs |
 | `'auto'` | Detects one of the above | Default |
 
 The setting only changes speed and what fits in memory. It never changes an experiment setting, so results from different machines can be combined.
@@ -133,4 +150,9 @@ On Colab, put `smalltalk.py`, `config.py` and `requirements.txt` in `MyDrive/sma
 
 ## Status
 
-The code is written and its logic has been tested on a small scale. The full runs on a GPU with the real models are still to be done, so there are no results to report yet.
+- Baselines done for Qwen3-4B (zeroshot, rag, agent) and Qwen3-8B (rag, agent)
+- Still to run: Qwen3-1.7B baselines, Ministral 3 3B baselines, SFT and DPO training, final evaluation
+
+Search quality on the 130 test questions with gold spans: MRR 0.648, Hit@8 0.915, Recall@8 0.566.
+
+Locally, run the notebooks from WSL (Linux) in a Python environment with `requirements.txt` installed. Native Windows Python does not support `bitsandbytes` 4-bit loading well.

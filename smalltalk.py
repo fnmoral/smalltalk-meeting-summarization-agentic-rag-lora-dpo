@@ -69,7 +69,7 @@ def setup_downloads(path):
     print(f'Downloads folder: {root} ({free:.0f} GB free)')
     print('Models already downloaded:', ', '.join(have) if have else 'none yet')
     if free < 25:
-        print('Warning: little space left. A 4B model needs about 9 GB and an 8B/9B model about 18 GB.')
+        print('Warning: little space left. A model needs about 2 GB per billion parameters (a 4B model about 8 GB).')
     return root
 
 
@@ -87,8 +87,13 @@ def run_profile(run_on='auto'):
         run_on = 'colab' if 'google.colab' in sys.modules else ('server' if gb >= 12 else 'local')
     profile = {'name': run_on, 'gpu_gb': round(gb, 1), **cfg.PROFILES[run_on]}
     print(f"Running on: {run_on} ({profile['gpu_gb']} GB GPU), batch size {profile['batch_size']}, "
-          f"big models: {profile['big_models']}, training: {profile['train']}")
+          f"models up to {profile['max_params_b']}B, training: {profile['train']}")
     return profile
+
+
+def fits(key, profile):
+    # models bigger than the profile allows are skipped on this machine
+    return cfg.PARAMS_B.get(key, 0) <= profile['max_params_b']
 
 
 # Data
@@ -353,14 +358,19 @@ def parse_step(text):
     return 'none', text.strip(), None
 
 
+def agent_messages(ctx, query, tools, max_steps=cfg.AGENT_MAX_STEPS):
+    # the same start prompt is used at test time and in the agent SFT examples
+    tool_desc = '\n'.join(f'- {name}[input]: {t.description}' for name, t in tools.items())
+    return [{'role': 'system', 'content': cfg.AGENT_SYSTEM.format(tools=tool_desc, max_steps=max_steps)},
+            {'role': 'user', 'content': f'Transcript excerpts:\n{ctx}\n\nQuestion: {query}'}]
+
+
 def run_agent(llm, m, ex, retriever, k=cfg.K, max_steps=cfg.AGENT_MAX_STEPS, max_new_tokens=cfg.MAX_NEW_TOKENS):
     # starts from the same chunks as rag mode, then the model chooses to answer or to call tools
     ctx, docs = rag_context(m, ex, retriever, k=k)
     start_hit = any(overlaps(d.metadata['start'], d.metadata['end'], ex['spans']) for d in docs) if ex['spans'] else None
     tools = make_tools(m, retriever, seen={d.page_content for d in docs})
-    tool_desc = '\n'.join(f'- {name}[input]: {t.description}' for name, t in tools.items())
-    messages = [{'role': 'system', 'content': cfg.AGENT_SYSTEM.format(tools=tool_desc, max_steps=max_steps)},
-                {'role': 'user', 'content': f"Transcript excerpts:\n{ctx}\n\nQuestion: {ex['query']}"}]
+    messages = agent_messages(ctx, ex['query'], tools, max_steps)
     trace, observations, format_errors, answer = [], [], 0, None
     for _ in range(max_steps):
         out = llm.chat(messages, max_new_tokens=max_new_tokens, stop=['Observation:'])
@@ -422,9 +432,12 @@ class LLM:
         self.model.eval()
         if self.tok.pad_token is None:
             self.tok.pad_token = self.tok.eos_token
+        # Mistral tokenizers must build the ids from the messages, encoding the prompt text would turn [INST] into plain text
+        self.ids_template = 'MistralCommon' in type(self.tok).__name__
         self.device = next(self.model.parameters()).device
         self.torch = torch
-        print(f'Loaded {model_id}: {gpu_gb():.1f} GB of GPU memory in use')
+        print(f'Loaded {model_id}: {gpu_gb():.1f} GB of GPU memory in use'
+              + (' (prompt ids built by the Mistral tokenizer)' if self.ids_template else ''))
 
     def format(self, messages):
         try:
@@ -432,6 +445,25 @@ class LLM:
                                                 enable_thinking=False)
         except TypeError:
             return self.tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+    def encode(self, messages):
+        # token ids of the chat prompt, ready for generation
+        if not self.ids_template:
+            return self.tok(self.format(messages), add_special_tokens=False)['input_ids']
+        try:
+            out = self.tok.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)
+        except TypeError:
+            out = self.tok.apply_chat_template(messages, tokenize=True)
+        ids = out['input_ids'] if hasattr(out, 'keys') else out
+        return list(ids[0] if ids and isinstance(ids[0], list) else ids)
+
+    def _tensors(self, ids_list):
+        # left padding so all prompts end at the same position
+        pad = self.tok.pad_token_id if self.tok.pad_token_id is not None else self.tok.eos_token_id
+        n = max(len(x) for x in ids_list)
+        ids = self.torch.tensor([[pad] * (n - len(x)) + list(x) for x in ids_list], device=self.device)
+        mask = self.torch.tensor([[0] * (n - len(x)) + [1] * len(x) for x in ids_list], device=self.device)
+        return {'input_ids': ids, 'attention_mask': mask}
 
     def count_tokens(self, text):
         return len(self.tok(text, add_special_tokens=False)['input_ids'])
@@ -452,8 +484,7 @@ class LLM:
         return kw
 
     def chat(self, messages, max_new_tokens=cfg.MAX_NEW_TOKENS, temperature=0.0, stop=None, n=1):
-        prompt = self.format(messages)
-        enc = self.tok(prompt, return_tensors='pt', add_special_tokens=False).to(self.device)
+        enc = self._tensors([self.encode(messages)])
         kw = self._gen_kwargs(max_new_tokens, temperature, stop, enc['input_ids'].shape[1])
         with self.torch.no_grad():
             if n == 1 and enc['input_ids'].shape[1] > cfg.PREFILL_CHUNK:
@@ -475,10 +506,7 @@ class LLM:
     def chat_batch(self, batch, max_new_tokens=cfg.MAX_NEW_TOKENS, temperature=0.0):
         if len(batch) == 1:
             return [self.chat(batch[0], max_new_tokens=max_new_tokens, temperature=temperature)]
-        # left padding so all prompts end at the same position
-        self.tok.padding_side = 'left'
-        prompts = [self.format(msgs) for msgs in batch]
-        enc = self.tok(prompts, return_tensors='pt', padding=True, add_special_tokens=False).to(self.device)
+        enc = self._tensors([self.encode(msgs) for msgs in batch])
         with self.torch.no_grad():
             out = self.model.generate(**enc, **self._gen_kwargs(max_new_tokens, temperature, None))
         return [clean_output(self.tok.decode(o[enc['input_ids'].shape[1]:], skip_special_tokens=True))
@@ -554,19 +582,36 @@ def clean_output(text):
 def done_keys(path):
     if not Path(path).exists():
         return set()
-    with open(path, encoding='utf-8') as f:
-        return {(r['meeting_id'], r['query']) for r in map(json.loads, f)}
+    return {(r['meeting_id'], r['query']) for r in read_jsonl(path)}
+
+
+def count_todo(path, examples):
+    """Questions in examples that have no saved answer in path yet."""
+    done = done_keys(path)
+    return sum((ex['meeting_id'], ex['query']) not in done for ex in examples)
 
 
 def append_jsonl(path, row):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
+    start = ''
+    if Path(path).exists() and Path(path).stat().st_size > 0:
+        with open(path, 'rb') as f:   # a disconnect can leave the last line unfinished, so start on a new line
+            f.seek(-1, 2)
+            start = '' if f.read(1) == b'\n' else '\n'
     with open(path, 'a', encoding='utf-8') as f:
-        f.write(json.dumps(row, ensure_ascii=False) + '\n')
+        f.write(start + json.dumps(row, ensure_ascii=False) + '\n')
 
 
 def read_jsonl(path):
+    """Skips a line cut short by a disconnect, so that question is simply run again."""
+    rows = []
     with open(path, encoding='utf-8') as f:
-        return [json.loads(line) for line in f]
+        for line in f:
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return rows
 
 
 def run_experiment(llm, mode, examples, meetings_by_id, retriever, out_path, k=cfg.K,
@@ -621,7 +666,7 @@ def test_subset(examples, n=None, seed=cfg.SEED):
 
 
 def parse_run_name(name):
-    # runs are saved as <model_key>_<stage>_<mode>, for example qwen3_4b_dpo_agent
+    # runs are saved as <model_key>_<stage>_<mode>, for example qwen3_17b_dpo_agent
     key, stage, mode = name.rsplit('_', 2)
     return key, stage, mode
 
@@ -632,6 +677,17 @@ def n_tokens(tok, text):
     return len(tok(text, add_special_tokens=False)['input_ids'])
 
 
+def fit_docs(tok, docs, budget):
+    # adds chunks in priority order until the token budget is full, then puts them back in meeting order
+    keep, used = [], 0
+    for d in docs:
+        size = n_tokens(tok, format_docs([d])) + 2
+        if used + size <= budget:
+            keep.append(d)
+            used += size
+    return sort_by_position(keep)
+
+
 def sft_rows(examples, meetings_by_id, retriever, tok, k=cfg.K, max_length=cfg.MAX_LEN):
     """Prompt-completion rows for TRL. Chunks are added by priority (gold evidence first) until the
     token budget is full, so prompt + answer fit in max_length and the evidence is never the part cut."""
@@ -639,15 +695,66 @@ def sft_rows(examples, meetings_by_id, retriever, tok, k=cfg.K, max_length=cfg.M
     for ex in examples:
         m = meetings_by_id[ex['meeting_id']]
         budget = max_length - n_tokens(tok, ex['answer']) - cfg.PROMPT_RESERVE
-        keep, used = [], 0
-        for d in ranked_docs(m, ex, retriever, k=k, add_gold=True):
-            size = n_tokens(tok, format_docs([d])) + 2
-            if used + size <= budget:
-                keep.append(d)
-                used += size
-        ctx = format_docs(sort_by_position(keep))
+        ctx = format_docs(fit_docs(tok, ranked_docs(m, ex, retriever, k=k, add_gold=True), budget))
         rows.append({'prompt': summary_messages(ctx, ex['query']),
                      'completion': [{'role': 'assistant', 'content': ex['answer']}]})
+    return rows
+
+
+def is_gold(d, ex):
+    return overlaps(d.metadata['start'], d.metadata['end'], ex['spans'])
+
+
+def gold_tool_call(m, ex, retriever, start_docs):
+    """A tool call whose output holds gold evidence the start excerpts do not have: (tool, input, output) or None.
+    Tries search_transcript with the question first, then each labelled topic."""
+    gold = [d for d in retriever.rank_all(m, ex['query']) if is_gold(d, ex)]
+    calls = [('search_transcript', ex['query'])] + [('get_topic_segment', str(i + 1)) for i in range(len(m['topics']))]
+    for name, arg in calls:
+        # a fresh tool set each time, because search_transcript remembers what it returned
+        obs = make_tools(m, retriever, seen={d.page_content for d in start_docs})[name].invoke(arg)
+        if any(d.page_content[:200] in obs for d in gold):   # checks the real output, which may be cut
+            return name, arg, obs
+    return None
+
+
+def agent_sft_rows(examples, meetings_by_id, retriever, tok, k=cfg.K, max_length=cfg.MAX_LEN,
+                   tool_share=cfg.AGENT_SFT_TOOL_SHARE, seed=cfg.SEED):
+    """Agent-format SFT rows built from the gold spans, so the model learns when a tool is needed.
+    answer: the start excerpts hold the evidence, so the model answers right away.
+    tool: the gold chunks are taken out of the start excerpts, so the model calls the tool that brings
+    them back and then answers. This case gives two rows, one for the action and one for the answer."""
+    rng = random.Random(seed)
+    rows, counts = [], {'answer': 0, 'tool': 0}
+    for ex in examples:
+        m = meetings_by_id[ex['meeting_id']]
+        call = None
+        if ex['qtype'] == 'specific' and rng.random() < tool_share:
+            ranked = retriever.rank_all(m, ex['query'])
+            pool = [d for d in ranked if not is_gold(d, ex)][:k]
+            call = gold_tool_call(m, ex, retriever, pool)
+        answer = f"Thought: {cfg.SFT_THOUGHT_ANSWER}\nFinal Answer: {ex['answer']}"
+        if call is None:
+            budget = max_length - n_tokens(tok, answer) - cfg.AGENT_PROMPT_RESERVE
+            start = fit_docs(tok, ranked_docs(m, ex, retriever, k=k, add_gold=True), budget)
+            tools = make_tools(m, retriever, seen={d.page_content for d in start})
+            rows.append({'prompt': agent_messages(format_docs(start), ex['query'], tools),
+                         'completion': [{'role': 'assistant', 'content': answer}]})
+            counts['answer'] += 1
+            continue
+        name, arg, obs = call
+        action = f'Thought: {cfg.SFT_THOUGHT_TOOL}\nAction: {name}[{arg}]'
+        final = f"Final Answer: {ex['answer']}"
+        budget = max_length - n_tokens(tok, action + obs + final) - cfg.AGENT_PROMPT_RESERVE
+        start = fit_docs(tok, pool, budget)
+        prompt = agent_messages(format_docs(start), ex['query'], make_tools(m, retriever))
+        rows.append({'prompt': prompt, 'completion': [{'role': 'assistant', 'content': action}]})
+        rows.append({'prompt': prompt + [{'role': 'assistant', 'content': action},
+                                         {'role': 'user', 'content': f'Observation:\n{obs}'}],
+                     'completion': [{'role': 'assistant', 'content': final}]})
+        counts['tool'] += 1
+    print(f"Agent SFT: {counts['answer']} questions answered right away, {counts['tool']} with a tool call "
+          f"({len(rows)} rows)")
     return rows
 
 
@@ -791,6 +898,32 @@ def tool_decisions(agent_path):
         if sub:
             out.append({'group': group, 'n': len(sub),
                         'tool_use_rate': float(np.mean([len(r['trace']) > 0 for r in sub]))})
+    return out
+
+
+def paired_bootstrap(a, b, n=2000, seed=cfg.SEED):
+    """Mean of b - a over the same questions with a 95% interval. If the interval does not include 0,
+    the difference is unlikely to be luck of which questions were in the test set."""
+    rng = np.random.default_rng(seed)
+    d = np.asarray(b, dtype=float) - np.asarray(a, dtype=float)
+    means = [d[rng.integers(0, len(d), len(d))].mean() for _ in range(n)]
+    lo, hi = np.percentile(means, [2.5, 97.5])
+    return {'difference': float(d.mean()), 'ci_low': float(lo), 'ci_high': float(hi),
+            'real_difference': bool(lo > 0 or hi < 0), 'b_better_share': float(np.mean(d > 0))}
+
+
+def compare_runs(path_a, path_b, faith=None):
+    """Per-question comparison of two runs on the questions both answered (b - a)."""
+    a = {(r['meeting_id'], r['query']): r for r in read_jsonl(path_a)}
+    b = {(r['meeting_id'], r['query']): r for r in read_jsonl(path_b)}
+    keys = [key for key in a if key in b]
+    refs = [a[key]['answer'] for key in keys]
+    pa, pb = [a[key]['pred'] or '' for key in keys], [b[key]['pred'] or '' for key in keys]
+    out = [{'metric': 'rougeL', 'n': len(keys), **paired_bootstrap(rouge_l_each(pa, refs), rouge_l_each(pb, refs))}]
+    if faith is not None:
+        fa = faith.score([a[key]['context'] or '' for key in keys], pa)
+        fb = faith.score([b[key]['context'] or '' for key in keys], pb)
+        out.append({'metric': 'faithfulness', 'n': len(keys), **paired_bootstrap(fa, fb)})
     return out
 
 
