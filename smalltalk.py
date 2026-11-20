@@ -985,7 +985,9 @@ def faith_scores(path, faith):
     rows = read_jsonl(path)
     if rows and rows[0].get('mode') in cfg.FAITH_SKIP_MODES:
         return [float('nan')] * len(rows)
-    cache = Path('results/faith') / Path(path).name
+    # same folders as under runs/, so runs/old/x/a.jsonl and runs/a.jsonl keep separate scores
+    p = Path(path)
+    cache = Path('results/faith') / (p.relative_to('runs') if p.parts[0] == 'runs' else p.name)
     done = {}
     if cache.exists():   # a saved score is only reused if the answer is still the same
         done = {(r['meeting_id'], r['query']): r for r in read_jsonl(cache)}

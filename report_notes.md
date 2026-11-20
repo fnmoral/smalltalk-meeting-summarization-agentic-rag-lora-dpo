@@ -23,7 +23,7 @@ Newest first. Each entry says what was found, what changed, and the reason.
 - **Length term in the reward:** the reward is now multiplied by the length ratio to the human summary (shorter word count / longer word count). Candidates close to the human length get the most reward, and both very short and very long ones lose some. With the saved candidates this gives 282 pairs, with chosen 62 and rejected 65 words on average, and the chosen one longer in 53% of pairs. Loops still land on the rejected side (42 rejected, 4 chosen).
 - **SFT loss on the chosen summary:** this is added to the DPO loss with equal weight (`loss_type=['sigmoid', 'sft']`, known as RPO, Pang et al. 2024). It keeps the probability of the good summaries up, so DPO cannot simply move away from both. The logged training loss is now DPO + SFT, so it starts near 2.9 instead of 0.69.
 - **No new candidates:** each saved candidate already has its faithfulness and ROUGE-L scores, so the new rewards are computed from them (`rescore_candidates`). The candidate step (91 minutes) is reused, and only DPO training and the DPO test answers run again.
-- **Second run archived:** its adapter, test answers, faithfulness scores, timing rows and result tables are in `old_runs/dpo_second_try/`, so its numbers can still be quoted.
+- **Second run archived:** its adapter, test answers, faithfulness scores, timing rows and result tables are in `runs/old/dpo_second_try/`, so its numbers can still be quoted.
 - **Notebook 3:** the significance table now also compares the tuned model with the SFT-only model, to test whether DPO itself made a real difference. The ablation table shows the loop rate.
 
 **Result of the third run (official scores, 150 test questions)**
@@ -103,7 +103,7 @@ The pairs now teach "do not loop" (53 loops on the rejected side), and the model
 
 **Story for the report:** SFT teaches the small model the content and style of QMSum summaries, but it introduces greedy repetition loops. DPO with greedy candidates teaches it to avoid them.
 
-**Cost of the first DPO attempt (not counted in the final cost table, kept in `old_runs/dpo_first_try/`):**
+**Cost of the first DPO attempt (not counted in the final cost table, kept in `runs/old/dpo_first_try/`):**
 
 | Step | Time | GPU memory |
 |---|---|---|

@@ -1,0 +1,7 @@
+run,list_topics,get_topic_segment,get_speaker_turns,search_transcript,tool_name,format_error_rate
+ministral3_3b_base_agent,0.16,0.28,0.31,1.01,0.01,0.19
+qwen3_17b_base_agent,0.0,0.0,0.0,0.04,0.0,0.06
+qwen3_17b_dpo_agent,0.0,0.0,0.0,0.23,0.0,0.0
+qwen3_17b_sft_agent,0.0,0.0,0.0,0.18,0.0,0.0
+qwen3_4b_base_agent,0.01,0.01,0.0,0.01,0.0,0.03
+qwen3_8b_base_agent,0.22,0.43,0.15,0.4,0.0,0.33

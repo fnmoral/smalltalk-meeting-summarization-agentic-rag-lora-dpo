@@ -135,10 +135,10 @@ The bigger models are not trained, so this does not change the baselines. The to
 | `2_lora_sft_dpo.ipynb` | SFT and DPO training for one small model at a time |
 | `3_final_evaluation.ipynb` | Runs the trained models and builds all tables and charts |
 | `report_notes.md` | Changes made during the project and the reason for each, for the report |
-| `runs/` | Every model answer, one jsonl file per run (`<model>_<stage>_<mode>`), with the context it read, its tool calls, time and token counts |
+| `runs/` | Every model answer, one jsonl file per run (`<model>_<stage>_<mode>`), with the context it read, its tool calls, time and token counts. `runs/old/` holds the two earlier DPO attempts, described in `report_notes.md` |
 | `results/` | Result tables (csv), the main chart, saved faithfulness scores (`faith/`), training logs and the timing log |
+| `adapters/` | The final LoRA adapters of the 1.7B model after SFT and after DPO |
 | `data/` | The DPO candidates: 4 summaries per DPO question with their faithfulness and ROUGE-L scores |
-| `old_runs/` | Answers and tables of the two earlier DPO attempts, described in `report_notes.md` |
 
 ## How to run
 
@@ -160,6 +160,25 @@ Nothing is downloaded twice. The dataset and the base models go into one downloa
 The setting only changes speed and what fits in memory. It never changes an experiment setting, so results from different machines can be combined.
 
 On Colab, put `smalltalk.py`, `config.py` and `requirements.txt` in `MyDrive/smalltalk/`. Results are saved there one line at a time, so after a disconnect you can run the same cell again and it continues where it stopped.
+
+## Running it from this repo on another machine
+
+Everything needed is in the repo except the dataset and the base models, which the notebooks download on their own.
+
+1. Clone the repo. On Linux or WSL (native Windows Python does not handle 4-bit loading well), make a Python 3.12 environment and run `pip install -r requirements.txt`.
+2. Run the notebooks in order: 1, then 2, then 3. All three notebooks skip work that is already done:
+   - **Answers:** a run whose file in `runs/` already has all 150 answers is skipped.
+   - **Training:** if the adapter is in `adapters/`, training is skipped.
+   - **Faithfulness:** scores saved in `results/faith/` are reused.
+
+   So on a fresh clone, notebook 3 rebuilds every table and the chart in about 15 minutes without generating any answers.
+3. To redo something, remove what it produced:
+   - **One run:** delete its file in `runs/`.
+   - **Training:** set `RETRAIN = True` in `config.py`, or delete the adapter.
+   - **DPO pairs:** the candidates are kept in `data/`. Changing the reward only needs notebook 2's pairs and training cells, not new candidates.
+4. To add a new test, for example another model, add it to `BIG_MODELS` and `PARAMS_B` in `config.py` and run notebook 1. Only the new runs are generated.
+
+Times in `results/` were measured on one local GPU. They are only comparable with times from the same GPU, so a new machine should time its own runs.
 
 ## Status
 
