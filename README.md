@@ -1,12 +1,12 @@
 # SmallTalk
 
-**Can Agentic RAG and LoRA-Based DPO Help a 1.7B Model Close the Gap with Larger Models in Meeting Summarization?**
+**Can Agentic RAG and LoRA Fine-Tuning (SFT + DPO) Help a 1.7B Model Match Larger Models in Meeting Summarization?**
 
 NLP 2 class project, Fanshawe College. Author: Francis Neil Moral.
 
 ## The idea in plain words
 
-Small AI models are cheap and can run on a normal laptop, but they usually write worse summaries than bigger models. This project tests whether a small model (1.7 billion parameters) can get close to models two to five times its size if we give it two kinds of help:
+Small AI models are cheap and can run on a normal laptop, but they usually write worse summaries than bigger models. This project tests whether a small model (1.7 billion parameters) can match models two to five times its size if we give it two kinds of help:
 
 1. **Better reading.** A one-hour meeting is too long for the model to read at once. So we give it only the parts of the meeting that relate to the question, and tools to look up more if those parts are not enough.
 2. **Extra training.** We train the small model on examples of good meeting summaries, then train it again to prefer summaries that stick to what was actually said.
@@ -62,7 +62,7 @@ flowchart LR
 
 Every model is loaded in 4-bit and answers the same 150 test questions, so the comparison is fair. None of the bigger models are trained.
 
-## Data
+## Dataset
 
 [QMSum](https://github.com/Yale-LILY/QMSum) (Zhong et al., NAACL 2021): 232 meetings with 1,810 questions and human-written answers. The meetings are product design meetings, academic meetings and parliament committee meetings. Many questions also mark which part of the transcript holds the answer. We use those marks, called gold spans, to check if the search finds the right chunks.
 
