@@ -2,6 +2,21 @@
 
 Newest first. Each entry says what was found, what changed, and the reason.
 
+## 2026-11-24: Zero-shot faithfulness scored on a cloud GPU
+
+- Zero-shot faithfulness was skipped before because HHEM ran out of memory on the 6,000-token input (see the 2026-11-20 entry below). It was needed for the slide that shows what each step adds.
+- The two zero-shot runs were scored once on a free 16 GB cloud GPU (T4) with the same HHEM model, one answer at a time, against the same 6,000-token excerpt the model read. Peak memory was about 8 GB.
+- Only the averages were kept (the per-answer scores were lost), so they are written into `all_results.csv` and `ablation.csv` by hand and there is no significance test for zero-shot faithfulness. `FAITH_SKIP_MODES` stays on, so notebook 3 does not try to score them on a small GPU. Rerunning notebook 3 rewrites both CSV files, so add the two values again afterwards.
+
+| | Zero-shot | RAG | Tuned, RAG |
+|---|---|---|---|
+| 1.7B faithfulness | 0.658 | 0.727 | 0.879 |
+| 1.7B hallucination rate | 31% | 23% | 6% |
+| 4B faithfulness | 0.604 | 0.722 | |
+| 4B hallucination rate | 38% | 21% | |
+
+- Zero-shot is the least faithful mode. The model only sees the start of the meeting, so for questions about later parts it has to guess. The 4B scores lower than the 1.7B here, likely because its zero-shot answers are longer (116 words against 93).
+
 ## 2026-11-20: Third DPO run, with length control and an SFT term
 
 **What was found (second DPO run, official scores, 150 test questions)**

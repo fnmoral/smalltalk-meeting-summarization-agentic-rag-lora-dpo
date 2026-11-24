@@ -72,7 +72,7 @@ Every model is loaded in 4-bit and answers the same 150 test questions, so the c
 |---|---|
 | ROUGE-1/2/L | How many words and phrases match the human summary |
 | BERTScore | How close the meaning is to the human summary |
-| Faithfulness (HHEM) | Is the summary supported by the text the model read? Under 0.5 counts as a hallucination. Not scored in `zeroshot` mode, whose 6,000-token input needs about 7 GB of GPU memory in HHEM |
+| Faithfulness (HHEM) | Is the summary supported by the text the model read? Under 0.5 counts as a hallucination. The `zeroshot` 6,000-token input needs about 8 GB of GPU memory in HHEM, so those runs were scored separately on a 16 GB cloud GPU |
 | Hit, Recall, Precision, MRR | Did the search find the chunks that hold the answer? |
 | Loop rate | Share of answers stuck repeating a phrase (under 80% distinct 4-grams) |
 | Tool use rate, format errors | How the agent behaved |

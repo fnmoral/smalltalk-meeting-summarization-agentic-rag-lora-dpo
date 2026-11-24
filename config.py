@@ -135,6 +135,6 @@ DPO = dict(beta=0.1, loss_type=['sigmoid', 'sft'], loss_weights=[1.0, 1.0], num_
 
 HALLUCINATION_BELOW = 0.5                      # a faithfulness score under this counts as a hallucination
 LOOP_BELOW = 0.8                               # an answer with a smaller share of distinct 4-grams counts as a repetition loop
-FAITH_SKIP_MODES = ['zeroshot']                # zeroshot reads 6,000 tokens, too long for HHEM on a small GPU (needs about 7 GB)
+FAITH_SKIP_MODES = ['zeroshot']                # zeroshot needs about 8 GB in HHEM, scored once on a 16 GB cloud GPU (see report_notes.md)
 GAP_MODE = 'agent'                             # mode used for the gap-closed table and the main chart
 FINAL_RUN = 'runs/qwen3_17b_dpo_agent.jsonl'   # run shown in the error analysis
